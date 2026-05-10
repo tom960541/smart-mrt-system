@@ -11,22 +11,26 @@ from io import BytesIO
 from gtts import gTTS
 from google import genai
 from streamlit_image_coordinates import streamlit_image_coordinates
+from ui_theme import apply_app_theme, render_header, render_status_strip
 
 # ==========================================
 # 系統設定與策略模式
 # ==========================================
-# 從 Streamlit Secrets 讀取金鑰，防呆機制
-try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-except KeyError:
-    st.error("找不到 API Key！請檢查 .streamlit/secrets.toml 是否已正確設定。")
-    st.stop() # 停止執行程式
-
-client = genai.Client(api_key=API_KEY)
-
 AVG_DISTANCE_PER_SEGMENT = 1.3
 
-# ✨ 備用計價公式 (當 TDX 查無資料時的 Fallback)
+
+def get_gemini_client():
+    try:
+        api_key = st.secrets["GEMINI_API_KEY"]
+    except Exception:
+        return None, "未設定 GEMINI_API_KEY，已改用本地站名比對；手動選站與地圖選站不受影響。"
+
+    try:
+        return genai.Client(api_key=api_key), ""
+    except Exception as exc:
+        return None, f"Gemini 初始化失敗：{exc}"
+
+# 備用計價公式 (當 TDX 查無資料時的 Fallback)
 def krt_fare_strategy(dist, line_type):
     fare = 20 + (math.ceil((dist - 5) / 2) * 5) if dist > 5 else 20
     max_fare = 35 if "C" in line_type or "LRT" in line_type else 60
@@ -182,7 +186,7 @@ def render_google_maps_widget(start_name, end_name, config):
         }}
         </style>
         <div class="google-map-float">
-            <details open>
+            <details>
                 <summary>Google Maps</summary>
                 <div class="google-map-route">
                     <strong>從</strong> {escape(st.session_state.custom_origin or '目前位置')} 
@@ -309,10 +313,10 @@ def get_fare_and_details(system, path_ids):
 
     if tdx_fare is not None and tdx_fare > 0:
         total_fare = tdx_fare
-        source_tag = "✅ 官方 TDX 真實票價"
+        source_tag = "官方 TDX 真實票價"
     else:
         total_fare = calculate_fare_fallback(system, path_ids)
-        source_tag = "⚠️ 系統公式估算 (涵蓋輕軌/特殊路線)"
+        source_tag = "系統公式估算，涵蓋輕軌與特殊路線"
 
     details = []
     curr_line = system.get_station(path_ids[0]).line_type
@@ -320,76 +324,105 @@ def get_fare_and_details(system, path_ids):
     for i in range(1, len(path_ids)):
         st_info = system.get_station(path_ids[i])
         if st_info.line_type != curr_line:
-            details.append(f"- {curr_line} 線: {seg_start_name} ➔ {system.get_station(path_ids[i-1]).name}")
+            details.append(f"- {curr_line} 線: {seg_start_name} -> {system.get_station(path_ids[i-1]).name}")
             seg_start_name = system.get_station(path_ids[i-1]).name
             curr_line = st_info.line_type
-    details.append(f"- {curr_line} 線: {seg_start_name} ➔ {system.get_station(path_ids[-1]).name}")
-    details.append(f"\n💰 總金額：{total_fare} 元 ({source_tag})")
+    details.append(f"- {curr_line} 線: {seg_start_name} -> {system.get_station(path_ids[-1]).name}")
+    details.append(f"\n總金額：{total_fare} 元 ({source_tag})")
     
     return total_fare, "\n".join(details)
 
+
+def match_stations_locally(user_text, system):
+    found_stations = []
+    sorted_stations = sorted(system.stations.values(), key=lambda s: len(s.name), reverse=True)
+
+    for st_info in sorted_stations:
+        aliases = {
+            st_info.name,
+            re.sub(r"[\(（].*?[\)）]", "", st_info.name).strip(),
+        }
+        for piece in re.split(r"[/／]", st_info.name):
+            aliases.add(piece.strip())
+
+        for alias in sorted((a for a in aliases if a), key=len, reverse=True):
+            if alias in user_text:
+                found_stations.append((st_info.sid, user_text.find(alias), len(alias)))
+                break
+
+    if not found_stations:
+        return None, None
+
+    found_stations.sort(key=lambda x: (x[1], -x[2]))
+
+    unique_mentions = []
+    seen_positions = set()
+    for sid, position, _alias_length in found_stations:
+        if position in seen_positions:
+            continue
+        seen_positions.add(position)
+        unique_mentions.append((sid, position))
+
+    if len(unique_mentions) < 2:
+        return None, None
+
+    return unique_mentions[0][0], unique_mentions[-1][0]
+
+
 def get_stations_from_ai(user_text, system):
-    try:
-        if not user_text.strip():
-            return None, None, "您沒有輸入任何文字喔！"
+    if not user_text.strip():
+        return None, None, "請輸入出發站與終點站，例如：從左營到美麗島。"
 
-        # 🚀 關鍵修復：把站名跟「代碼 (sid)」綁定在一起交給 AI (例如: 左營(R16))
-        station_info = ", ".join([f"{s.name}({s.sid})" for s in system.stations.values()])
-        prompt = f"你是一個捷運解析器。請嚴格輸出JSON: {{\"start_id\":\"...\",\"end_id\":\"...\"}}。站點列表:[{station_info}]。輸入：「{user_text}」"
+    station_info = ", ".join([f"{s.name}({s.sid})" for s in system.stations.values()])
+    prompt = (
+        "你是一個捷運站名解析器。"
+        "請只輸出 JSON，不要加說明文字，格式為 "
+        '{"start_id":"...","end_id":"..."}。'
+        f"站點列表：[{station_info}]。"
+        f"使用者輸入：{user_text}"
+    )
 
-        # 🚀 鎖定最新旗艦模型：gemini-2.0-flash，並加入 1.5 作為穩定備援
+    response = None
+    cloud_error = ""
+    client, client_error = get_gemini_client()
+
+    if client:
         model_candidates = [
-            'gemini-3-flash-preview'
-            
+            "gemini-3-flash-preview",
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
         ]
-        
-        response = None
-        last_error = ""
-        
-        # --- 階段 1：嘗試呼叫雲端 AI ---
+
         for model_name in model_candidates:
             try:
                 response = client.models.generate_content(
-                    model=model_name, 
-                    contents=prompt  # 使用帶有代碼的完整提示詞
+                    model=model_name,
+                    contents=prompt,
                 )
-                break 
+                break
             except Exception as e:
-                last_error = str(e)
+                cloud_error = str(e)
                 continue
-                
-        # --- 階段 2：驗證 AI 結果 ---
-        if response and response.text:
-            match = re.search(r'\{.*\}', response.text.strip(), re.DOTALL)
+
+    if response and response.text:
+        try:
+            match = re.search(r"\{.*\}", response.text.strip(), re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
                 s_id, e_id = data.get("start_id"), data.get("end_id")
-                # 這次系統就能成功認出 AI 回傳的代碼了！
                 if s_id in system.stations and e_id in system.stations:
-                    return s_id, e_id, "成功 (來自 Gemini 雲端 AI)"
+                    return s_id, e_id, "成功，來自 Gemini 文字解析。"
+        except Exception as exc:
+            cloud_error = str(exc)
 
-        # AI 失敗！拋出例外以觸發本地端備援機制
-        raise Exception(f"API 無法服務 ({last_error})")
+    s_id, e_id = match_stations_locally(user_text, system)
+    if s_id and e_id:
+        if client_error:
+            return s_id, e_id, f"成功，使用本地站名比對。{client_error}"
+        return s_id, e_id, "成功，使用本地站名比對。"
 
-    except Exception as fallback_reason: 
-        # ==========================================
-        # 🚀 階段 3：本地端 NLP 備援機制 (Local Fallback)
-        # ==========================================
-        found_stations = []
-        
-        sorted_stations = sorted(system.stations.values(), key=lambda s: len(s.name), reverse=True)
-        
-        for st in sorted_stations:
-            if st.name in user_text:
-                found_stations.append((st.sid, user_text.find(st.name)))
-        
-        if len(found_stations) >= 2:
-            found_stations.sort(key=lambda x: x[1])
-            s_id = found_stations[0][0]
-            e_id = found_stations[-1][0]
-            return s_id, e_id, f"成功 (✨ 觸發系統本地端文字比對備援)"
-            
-        return None, None, f"AI 連線失敗且無法由文字比對出站點。原因：{str(fallback_reason)}"
+    reason = cloud_error or client_error or "無法辨識兩個有效站名"
+    return None, None, f"無法解析起訖站。請改用站名下拉選單，或輸入完整站名。原因：{reason}"
 
 def generate_speech_audio(start_name, end_name, fare):
     text = f"已為您規劃從{start_name}到{end_name}的路徑。總票價{fare}元。"
@@ -403,12 +436,19 @@ def generate_speech_audio(start_name, end_name, fare):
 # UI 介面
 # ==========================================
 def run():
-    try: st.set_page_config(page_title="智慧捷運路徑規劃系統", layout="wide")
-    except: pass
+    try:
+        st.set_page_config(page_title="智慧捷運路徑規劃系統", layout="wide")
+    except Exception:
+        pass
 
-    st.title("🚆 智慧捷運路徑規劃系統 (2.0 Flash 雙引擎版)")
+    apply_app_theme()
+    render_header(
+        "ROUTE PLANNER",
+        "智慧捷運路徑規劃",
+        "輸入自然語言、手動選站或直接點擊路網圖，快速比較最少站數與最省票價路線。",
+    )
 
-    selected_map = st.selectbox("🗺️ 選擇路網", list(MAP_DATABASE.keys()))
+    selected_map = st.selectbox("選擇路網", list(MAP_DATABASE.keys()))
     config = MAP_DATABASE[selected_map]
 
     sys_data = load_json_data(config["json"])
@@ -416,8 +456,16 @@ def run():
     mrt = TransitSystem(sys_data, fare_data, config["fare_func"])
 
     if not sys_data:
-        st.error("地圖資料載入失敗")
+        st.error("地圖資料載入失敗，請確認 JSON 檔案存在且格式正確。")
         return
+
+    render_status_strip(
+        [
+            ("目前路網", selected_map),
+            ("站點數", f"{len(mrt.stations)}"),
+            ("票價來源", "TDX + 備援公式"),
+        ]
+    )
 
     names = mrt.get_all_display_names()
     if 'start_st' not in st.session_state: st.session_state.start_st = names[0]
@@ -425,30 +473,30 @@ def run():
     if 'next_click_is_start' not in st.session_state: st.session_state.next_click_is_start = True
     if 'last_click' not in st.session_state: st.session_state.last_click = None
     if 'custom_origin' not in st.session_state: st.session_state.custom_origin = ""
+    if 'route_result' not in st.session_state: st.session_state.route_result = None
 
-    col_ui, col_map = st.columns([1, 2.5])
+    col_ui, col_map = st.columns([1, 2.35])
 
     with col_ui:
-        st.subheader("✨ AI 語音/文字助理")
+        st.subheader("AI 文字助理")
         
         with st.form(key="ai_form"):
-            user_input = st.text_input("你想去哪？", placeholder="例如：從高鐵站搭到愛河之心")
-            submit_btn = st.form_submit_button("🤖 AI 規劃", use_container_width=True)
+            user_input = st.text_input("輸入行程", placeholder="例如：從左營到美麗島")
+            submit_btn = st.form_submit_button("解析起訖站", use_container_width=True)
             
         if submit_btn:
-            with st.spinner("AI 腦力激盪中..."):
+            with st.spinner("正在解析站名..."):
                 sid_s, sid_e, msg = get_stations_from_ai(user_input, mrt)
                 
                 if sid_s and sid_e:
                     st.session_state.start_st = mrt.get_station(sid_s).display_name
                     st.session_state.end_st = mrt.get_station(sid_e).display_name
-                    st.success(f"✅ 解析成功！狀態：{msg}")
-                    st.rerun() 
+                    st.success(msg)
                 else:
-                    st.error(f"❌ 解析失敗：{msg}")
+                    st.error(msg)
 
-        # 🧹 已清理乾淨的 UI 區塊
         st.divider()
+        st.subheader("路線條件")
         idx_s = names.index(st.session_state.start_st) if st.session_state.start_st in names else 0
         idx_e = names.index(st.session_state.end_st) if st.session_state.end_st in names else 0
 
@@ -458,11 +506,11 @@ def run():
         st.session_state.start_st = sel_start
         st.session_state.end_st = sel_end
 
-        search_mode = st.radio("⚙️ 選擇路徑規劃策略", ["最少站數 (BFS)", "最省票價 (Dijkstra)"], horizontal=True)
+        search_mode = st.radio("路徑規劃策略", ["最少站數 (BFS)", "最省票價 (Dijkstra)"], horizontal=True)
 
-        if st.button("🔍 查詢路徑", type="primary", use_container_width=True):
+        if st.button("查詢路徑", type="primary", use_container_width=True):
             if sel_start == sel_end:
-                st.warning("起終點相同")
+                st.warning("起點與終點相同，請選擇不同站點。")
             else:
                 id_s, id_e = mrt.get_sid_by_name(sel_start), mrt.get_sid_by_name(sel_end)
                 
@@ -473,39 +521,69 @@ def run():
                     
                 if path:
                     fare, details = get_fare_and_details(mrt, path)
-                    st.success(f"**系統報價：{fare} 元** | **總站數：{len(path)} 站**")
-                    st.text_area("路徑詳情", details, height=130)
-                    
-                    path_display = " ➔ ".join([f"[{mrt.get_station(i).line_type}] {mrt.get_station(i).name}" for i in path])
-                    st.info(f"建議路徑：\n{path_display}")
-                    
-                    audio = generate_speech_audio(sel_start, sel_end, fare)
-                    st.audio(audio, format="audio/mp3", autoplay=True)
-                else:
-                    st.error("找不到相連路徑")
+                    st.session_state.route_result = {
+                        "map": selected_map,
+                        "start": sel_start,
+                        "end": sel_end,
+                        "strategy": search_mode,
+                        "path": path,
+                        "fare": fare,
+                        "details": details,
+                    }
 
-        # ✨ 新增：Google Maps 自定義出發地設定區
+                    try:
+                        audio = generate_speech_audio(sel_start, sel_end, fare)
+                        st.audio(audio, format="audio/mp3", autoplay=True)
+                    except Exception:
+                        st.caption("語音播報暫時無法產生，路線查詢結果不受影響。")
+                else:
+                    st.error("找不到相連路徑，請改用另一組站點或切換路網。")
+
+        route_result = st.session_state.route_result
+        if (
+            route_result
+            and route_result["map"] == selected_map
+            and route_result["start"] == sel_start
+            and route_result["end"] == sel_end
+        ):
+            path_display = " -> ".join(
+                [f"[{mrt.get_station(i).line_type}] {mrt.get_station(i).name}" for i in route_result["path"]]
+            )
+            st.markdown(
+                f"""
+                <div class="route-summary">
+                    <div class="route-summary-title">查詢結果：{route_result["fare"]} 元，{len(route_result["path"])} 站</div>
+                    <div class="route-summary-body">{escape(route_result["strategy"])} · {escape(route_result["start"])} 到 {escape(route_result["end"])}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.text_area("路線分段與票價", route_result["details"], height=130)
+            st.info(f"建議路徑：\n{path_display}")
+
         st.divider()
-        st.subheader("📍 Google Maps 設定")
+        st.subheader("Google Maps 設定")
         custom_origin = st.text_input(
-            "自訂出發地點 (選填)",
+            "自訂出發地點",
             value=st.session_state.custom_origin,
-            placeholder="例如：台灣高雄市左營區、家裡地址等"
+            placeholder="選填，例如：台灣高雄市左營區"
         )
         if custom_origin != st.session_state.custom_origin:
             st.session_state.custom_origin = custom_origin
-            st.info("✅ 出發地點已更新！Google Maps 小工具將使用新位置。")
+            st.info("出發地點已更新，Google Maps 小工具將使用新位置。")
 
     with col_map:
-        st.subheader("🗺️ 互動地圖")
-        if st.session_state.next_click_is_start: st.info("👆 請在地圖點擊 **出發站**")
-        else: st.warning("👆 請在地圖點擊 **終點站**")
+        st.subheader("互動地圖")
+        if st.session_state.next_click_is_start:
+            st.info("請在地圖點擊出發站。")
+        else:
+            st.warning("請在地圖點擊終點站。")
 
         try:
             img = Image.open(config["img"])
             w_orig, h_orig = img.size
 
-            TARGET_WIDTH = 450
+            TARGET_WIDTH = 520
             scale_ratio = TARGET_WIDTH / w_orig  
 
             click = streamlit_image_coordinates(

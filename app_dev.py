@@ -1,25 +1,64 @@
-import streamlit as st
 import json
 
+import streamlit as st
+
+from ui_theme import apply_app_theme, render_header, render_status_strip
+
+
+DATA_FILES = [
+    "krt_data.json",
+    "tpi_data.json",
+    "krt_real_fare.json",
+    "tpi_real_fare.json",
+]
+
+
 def run():
-    st.title("🔧 系統後台管理與資料庫監控")
-    st.warning("⚠️ 您目前處於開發者模式。")
-    
-    st.subheader("📂 捷運路線與票價資料庫狀態")
-    
-    target_file = st.selectbox("選擇要檢查的地圖資料：", 
-        ["krt_data.json", "tpi_data.json", "krt_real_fare.json", "tpi_real_fare.json"])
-    
+    apply_app_theme()
+    render_header(
+        "DATA MONITOR",
+        "系統後台管理與資料庫監控",
+        "檢查捷運路網、票價矩陣與原始 JSON 內容，協助確認資料部署狀態。",
+    )
+
+    st.subheader("資料檔狀態")
+
+    target_file = st.selectbox("選擇要檢查的資料檔", DATA_FILES)
+
     try:
-        with open(target_file, 'r', encoding='utf-8') as f:
+        with open(target_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-            
-        st.success(f"成功讀取 {target_file}，共包含 {len(data)} 筆主鍵資料。")
-        with st.expander("點此展開檢視原始 JSON 節點資料"):
+
+        render_status_strip(
+            [
+                ("目前檔案", target_file),
+                ("主鍵筆數", f"{len(data)}"),
+                ("讀取狀態", "正常"),
+            ]
+        )
+
+        st.success(f"{target_file} 已成功讀取。")
+        with st.expander("檢視原始 JSON 節點資料"):
             st.json(data)
-            
+
     except FileNotFoundError:
-        st.error(f"找不到檔案 {target_file}，請確認檔案存在。")
-        
+        render_status_strip(
+            [
+                ("目前檔案", target_file),
+                ("主鍵筆數", "0"),
+                ("讀取狀態", "找不到檔案"),
+            ]
+        )
+        st.error(f"找不到 {target_file}，請確認檔案已部署到專案根目錄。")
+    except json.JSONDecodeError as exc:
+        render_status_strip(
+            [
+                ("目前檔案", target_file),
+                ("主鍵筆數", "0"),
+                ("讀取狀態", "JSON 格式錯誤"),
+            ]
+        )
+        st.error(f"{target_file} 不是有效 JSON：{exc}")
+
     st.divider()
-    st.info("💡 提示：本區塊為系統展示。若需更新官方票價，請於本地端執行 update_tdx_fare.py 爬蟲腳本後，再推送至伺服器。")
+    st.info("如需更新官方票價，請先在本地端重新產生票價資料，再部署更新後的 JSON 檔。")
