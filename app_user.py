@@ -2,6 +2,7 @@ import streamlit as st
 import json
 import math
 import heapq
+import os
 import re
 import urllib.parse
 from collections import deque
@@ -61,12 +62,18 @@ MAP_DATABASE = {
 # 核心資料結構
 # ==========================================
 @st.cache_data
-def load_json_data(filepath):
+def load_json_data(filepath, modified_time=None):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             return json.load(f)
     except Exception:
         return {}
+
+def get_file_modified_time(filepath):
+    try:
+        return os.path.getmtime(filepath)
+    except OSError:
+        return None
 
 def make_google_maps_urls(start_name, config):
     area = config.get("google_area", "Taiwan")
@@ -446,8 +453,8 @@ def run():
     selected_map = st.selectbox("選擇路網", list(MAP_DATABASE.keys()))
     config = MAP_DATABASE[selected_map]
 
-    sys_data = load_json_data(config["json"])
-    fare_data = load_json_data(config["fare_json"])
+    sys_data = load_json_data(config["json"], get_file_modified_time(config["json"]))
+    fare_data = load_json_data(config["fare_json"], get_file_modified_time(config["fare_json"]))
     mrt = TransitSystem(sys_data, fare_data, config["fare_func"])
 
     if not sys_data:
