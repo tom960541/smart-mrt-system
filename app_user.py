@@ -68,14 +68,13 @@ def load_json_data(filepath):
     except Exception:
         return {}
 
-def make_google_maps_urls(start_location, end_name, config):
+def make_google_maps_urls(start_name, config):
     area = config.get("google_area", "Taiwan")
-    destination = f"{end_name} MRT station {area}"
-    origin = start_location if start_location else "Current Location"
+    destination = f"{start_name} MRT station {area}"
 
     route_params = urllib.parse.urlencode({
         "api": "1",
-        "origin": origin,
+        "origin": "Current Location",
         "destination": destination,
         "travelmode": "transit",
     })
@@ -89,15 +88,11 @@ def make_google_maps_urls(start_location, end_name, config):
     embed_url = f"https://www.google.com/maps?q={urllib.parse.quote_plus(destination)}&output=embed"
     return directions_url, search_url, embed_url
 
-def render_google_maps_widget(start_name, end_name, config):
-    if not end_name:
+def render_google_maps_widget(start_name, config):
+    if not start_name:
         return
 
-    # 初始化 session state
-    if 'custom_origin' not in st.session_state:
-        st.session_state.custom_origin = ""
-
-    directions_url, search_url, embed_url = make_google_maps_urls(st.session_state.custom_origin or start_name, end_name, config)
+    directions_url, search_url, embed_url = make_google_maps_urls(start_name, config)
     
     st.markdown(
         f"""
@@ -189,8 +184,8 @@ def render_google_maps_widget(start_name, end_name, config):
             <details>
                 <summary>Google Maps</summary>
                 <div class="google-map-route">
-                    <strong>從</strong> {escape(st.session_state.custom_origin or '目前位置')} 
-                    <strong>到</strong> {escape(end_name)}
+                    <strong>從</strong> 目前位置
+                    <strong>到</strong> {escape(start_name)}
                 </div>
                 <iframe
                     class="google-map-frame"
@@ -200,7 +195,7 @@ def render_google_maps_widget(start_name, end_name, config):
                 </iframe>
                 <div class="google-map-actions">
                     <a href="{escape(directions_url, quote=True)}" target="_blank" rel="noopener noreferrer">開啟路線</a>
-                    <a class="secondary" href="{escape(search_url, quote=True)}" target="_blank" rel="noopener noreferrer">查看終點站</a>
+                    <a class="secondary" href="{escape(search_url, quote=True)}" target="_blank" rel="noopener noreferrer">查看出發站</a>
                 </div>
             </details>
         </div>
@@ -472,7 +467,6 @@ def run():
     if 'end_st' not in st.session_state: st.session_state.end_st = names[0]
     if 'next_click_is_start' not in st.session_state: st.session_state.next_click_is_start = True
     if 'last_click' not in st.session_state: st.session_state.last_click = None
-    if 'custom_origin' not in st.session_state: st.session_state.custom_origin = ""
     if 'route_result' not in st.session_state: st.session_state.route_result = None
 
     col_ui, col_map = st.columns([1, 2.35])
@@ -561,17 +555,6 @@ def run():
             st.text_area("路線分段與票價", route_result["details"], height=130)
             st.info(f"建議路徑：\n{path_display}")
 
-        st.divider()
-        st.subheader("Google Maps 設定")
-        custom_origin = st.text_input(
-            "自訂出發地點",
-            value=st.session_state.custom_origin,
-            placeholder="選填，例如：台灣高雄市左營區"
-        )
-        if custom_origin != st.session_state.custom_origin:
-            st.session_state.custom_origin = custom_origin
-            st.info("出發地點已更新，Google Maps 小工具將使用新位置。")
-
     with col_map:
         st.subheader("互動地圖")
         if st.session_state.next_click_is_start:
@@ -619,7 +602,7 @@ def run():
         except Exception as e:
             st.error(f"地圖元件錯誤: {e}")
 
-    render_google_maps_widget(st.session_state.start_st, st.session_state.end_st, config)
+    render_google_maps_widget(st.session_state.start_st, config)
 
 if __name__ == "__main__":
     run()
