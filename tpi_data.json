@@ -7,6 +7,7 @@
         ],
         "line_type": "BR",
         "neighbors": [
+            "BR00",
             "BR02"
         ]
     },
@@ -1466,5 +1467,14 @@
             "BL22",
             "BR24"
         ]
+    },
+    "BR00": {
+        "name": "政大",
+        "coords": [
+            1207,
+            943
+        ],
+        "line_type": "BR",
+        "neighbors": ["BR01"]
     }
 }
